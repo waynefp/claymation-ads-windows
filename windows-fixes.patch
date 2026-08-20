@@ -1,0 +1,277 @@
+--- a/scripts/assemble.sh
++++ b/scripts/assemble.sh
+@@ -44,7 +44,12 @@
+   fi
+ done
+ 
+-for F in "$WORK"/seg-*.mp4; do case "$F" in /*) echo "file '$F'";; *) echo "file '$PWD/$F'";; esac; done > "$WORK/concat.txt"
++# Segments live beside concat.txt, and the concat demuxer resolves relative
++# entries against the LIST FILE's own directory — so bare basenames are correct
++# on every platform. Do not reintroduce $PWD here: under Git Bash on Windows it
++# expands to a POSIX path (/c/Users/...) that the native ffmpeg.exe cannot open,
++# and the concat step dies with "Impossible to open".
++for F in "$WORK"/seg-*.mp4; do echo "file '$(basename "$F")'"; done > "$WORK/concat.txt"
+ ffmpeg -y -v error -f concat -safe 0 -i "$WORK/concat.txt" -c copy "$WORK/joined.mp4"
+ 
+ if [ -n "$MUSIC" ]; then
+--- a/scripts/contact_sheet.sh
++++ b/scripts/contact_sheet.sh
+@@ -1,16 +1,39 @@
+-#!/usr/bin/env bash
+-# Tile every scene still into one contact sheet for review — a strip of
+-# thumbnails is how a human catches the one off-model frame in seconds.
+-#
+-#   contact_sheet.sh <ad-folder>
+-set -euo pipefail
+-
+-DIR="$1"
+-COUNT=$(ls "$DIR/stills"/scene-*.png 2>/dev/null | wc -l | tr -d ' ')
+-[ "$COUNT" -gt 0 ] || { echo "No stills in $DIR/stills yet." >&2; exit 1; }
+-COLS=$(( COUNT >= 5 ? 5 : COUNT ))
+-ROWS=$(( (COUNT + COLS - 1) / COLS ))
+-ffmpeg -y -v error -pattern_type glob -i "$DIR/stills/scene-*.png" \
+-  -filter_complex "scale=270:480,tile=${COLS}x${ROWS}:padding=8:color=white" \
+-  -frames:v 1 "$DIR/contact-sheet.png"
+-echo "$DIR/contact-sheet.png"
++#!/usr/bin/env bash
++# Tile every scene still into one contact sheet for review — a strip of
++# thumbnails is how a human catches the one off-model frame in seconds.
++#
++#   contact_sheet.sh <ad-folder>
++set -euo pipefail
++
++DIR="$1"
++
++# Collect scene stills in numeric order using the SHELL's glob, not ffmpeg's.
++# ffmpeg -pattern_type glob is unavailable on common Windows builds ("globbing
++# is not supported by this libavformat build", exit 127), which made this script
++# fail outright there. Staging sequentially-numbered copies lets us feed the
++# image2 demuxer a %03d pattern instead, which every build supports.
++STILLS=()
++for F in "$DIR"/stills/scene-[0-9][0-9].png; do
++  [ -e "$F" ] && STILLS+=("$F")
++done
++COUNT=${#STILLS[@]}
++[ "$COUNT" -gt 0 ] || { echo "No stills in $DIR/stills yet." >&2; exit 1; }
++
++# Stage inside the ad folder, not mktemp: under Git Bash mktemp returns a POSIX
++# path (/tmp/...) that native ffmpeg.exe cannot open. Paths handed to ffmpeg
++# must stay in whatever form the caller used for "$DIR".
++STAGE="$DIR/.contact"
++rm -rf "$STAGE"; mkdir -p "$STAGE"
++trap 'rm -rf "$STAGE"' EXIT
++i=1
++for F in "${STILLS[@]}"; do
++  cp "$F" "$(printf '%s/img-%03d.png' "$STAGE" "$i")"
++  i=$((i + 1))
++done
++
++COLS=$(( COUNT >= 5 ? 5 : COUNT ))
++ROWS=$(( (COUNT + COLS - 1) / COLS ))
++ffmpeg -y -v error -start_number 1 -i "$STAGE/img-%03d.png" \
++  -filter_complex "scale=270:480,tile=${COLS}x${ROWS}:padding=8:color=white" \
++  -frames:v 1 "$DIR/contact-sheet.png"
++echo "$DIR/contact-sheet.png"
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,6 +1,6 @@
+ ---
+ name: claymation-ads
+-description: Produce a finished AI claymation video ad end-to-end from a product image and an angle, using a FAL API key — planned script, approved character masters, chained keyframe stills, per-line voiceover, transition-clip animation, and ffmpeg assembly into one vertical MP4. Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
++description: Produce a finished AI claymation video ad end-to-end from a product image and an angle, using a FAL API key — planned script, approved character masters, chained keyframe stills, per-line voiceover, gemini-omni clip animation, optional lipsync to a chosen voice, and ffmpeg assembly into one finished MP4 (9:16 or 16:9). Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
+ ---
+ 
+ # Claymation Ads
+@@ -9,6 +9,17 @@
+ 
+ **Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** — it has the payload shapes and model routes.
+ 
++## Default stack
++
++| Role | Model | Notes |
++|---|---|---|
++| Images | `openai/gpt-image-2` (`/edit` for references) | style lock, masters, keyframes |
++| Video | `google/gemini-omni-flash/reference-to-video` | 720p, `duration` int 3–10, `aspect_ratio` **only** `9:16` or `16:9` |
++| Voice | ElevenLabs — direct API when the user names a voice, via FAL for stock | clones resolve ONLY on the direct route |
++| Lipsync | `fal-ai/sync-lipsync/v2` | only when a character speaks on camera |
++
++Use these unless the user asks otherwise. The one rule binding them together: **the video model emits only 9:16 and 16:9, so every still must be generated at that aspect from the start.** Choose it at gate 2. Reframing later is a full re-render, costs an extra generation, and degrades any label or signage text in frame.
++
+ ## Why this order works (understand this before deviating)
+ 
+ Character consistency in AI video comes from three mechanisms stacked, none sufficient alone:
+@@ -55,10 +66,11 @@
+ 
+ Write `plan.json` (schema in `references/prompts.md`):
+ 
+-- **Script**: 8–12 narration lines. Each line ≤10 words — this is a hard constraint, because each line becomes one scene and one voiceover segment, and its clip is generated at 4 seconds; a line that reads longer than ~4s breaks assembly. Short declarative sentences are also just better ad copy.
++- **Aspect**: `9:16` (vertical — feed ads, mobile-first landing pages) or `16:9` (horizontal — desktop embeds, YouTube pre-roll). These are the ONLY two the video model emits, so this choice is a hard contract: it fixes the `image_size` of every still (`portrait_16_9` / `landscape_16_9`) and the `aspect_ratio` of every clip. Decide it here and never reframe later — a reframing pass re-renders the whole image and puts all label and signage text back at risk.
++- **Script**: 8–12 narration lines. Each line ≤10 words — this is a hard constraint, because each line becomes one scene and one voiceover segment; a line that reads longer than its clip breaks assembly. Short declarative sentences are also just better ad copy.
+ - **Cast**: 1–3 recurring non-product subjects, each with name, kind, and appearance description. Personify boldly — an organ, a hormone, a problem can be a character. Do NOT cast the product.
+ - **Visual world**: material system, palette, lighting, set language, shared character construction grammar (hand style, eye design, mouth rules), negative constraints.
+-- **Scenes**: one per line, each with an image prompt built per the keyframe template.
++- **Scenes**: one per line, each with an image prompt built per the keyframe template. Group consecutive beats that share a camera setup — they can become ONE clip rather than several (see gate 5).
+ 
+ Present the script and cast list for approval. This is the highest-leverage review in the whole pipeline — a weak line here costs money at every later stage.
+ 
+@@ -81,14 +93,22 @@
+ 
+ ### Gate 5 — Voiceover, then clips (the expensive gate)
+ 
+-1. **VO first**: one TTS call per narration line via `scripts/tts_line.sh`, which also probes each mp3's real duration into `vo/durations.json`. Cheap — no gate needed, but play one line back so the user confirms the voice before 10 more.
+-2. **Quote the clips**: N−1 clips at the video model's price. This is most of the ad's cost — state the number and get explicit approval.
+-3. Generate clip K from stills [K, K+1] with the transition contract prompt (template in `references/prompts.md`), duration 4s.
+-4. **Generate the outro clip N too** (single-reference idle animation of the final still — template in `references/prompts.md`) and include it in the quote. Without it the last narration line plays over a frozen still, which clients reliably read as a bug. assemble.sh picks it up automatically.
++Default video model: **`google/gemini-omni-flash/reference-to-video`**. Schema and constraints in `references/fal-api.md` — read it before the first clip call.
++
++1. **VO first**: one TTS call per narration line via `scripts/tts_line.sh`, which also probes each mp3's real duration into `vo/durations.json`. Cheap — no gate needed, but play one line back so the user confirms the voice before 10 more. If the user named a specific voice, verify `ELEVENLABS_VOICE_ID` is set first: without it the script silently uses a FAL stock voice instead, with no error.
++2. **Decide the clip boundaries before quoting.** Omni honours timing instructions inside the prompt ("within the first 1.5 seconds… then for the remainder…"), so one clip can carry several beats. Generate one clip per *camera setup*, not one per beat. A single 9s clip covering "closes the book, then speaks to camera" beats two stitched clips on cost, on seams, and on lipsync stability. Only split when the setup genuinely changes.
++3. **Quote the clips**: clip count × seconds × the per-second price. This is most of the ad's cost — state the number and get explicit approval.
++4. Generate each clip with the transition contract prompt (template in `references/prompts.md`), `aspect_ratio` from gate 2, `duration` an integer 3–10. **Generate at the length you need** — never generate long and speed-ramp with `setpts`, which desynchronises lipsync exactly where speech starts.
++5. **If the ad has an on-camera speaker**, Omni cannot be given your voiceover — it invents its own speech and animates the mouth to that. Strip its audio (`-an`), then bind the real VO with `fal-ai/sync-lipsync/v2`. Pad the VO's lead-in silence to the frame where the character is actually ready to speak; find that frame by inspecting the clip, not by assuming.
++6. **For multi-scene ads, generate the outro clip N too** (single-reference idle animation of the final still — template in `references/prompts.md`) and include it in the quote. Without it the last narration line plays over a frozen still, which clients reliably read as a bug. assemble.sh picks it up automatically.
+ 
+ ### Assembly (free)
+ 
+-Run `scripts/assemble.sh <ad-folder>`. Per scene it trims the clip to that line's measured VO duration (freeze-holding the last frame if the VO runs past the clip), muxes the narration, concats everything, and normalizes loudness to -14 LUFS. Optional: pass a music bed file to duck it under the narration. Output: `final.mp4`, 9:16, ready to post.
++Run `scripts/assemble.sh <ad-folder>`. Per scene it trims the clip to that line's measured VO duration (freeze-holding the last frame if the VO runs past the clip), muxes the narration, concats everything, and normalizes loudness to -14 LUFS. Optional: pass a music bed file to duck it under the narration. Output: `final.mp4` at the gate-2 aspect, ready to post.
++
++For a single-scene ad the script is overkill — trim, mux, and `loudnorm=I=-14:TP=-1.5:LRA=11` directly.
++
++**Captions.** Landing-page and feed video autoplays muted, so a voiceover-only ad is silent mouth movement to most viewers. Offer burned-in captions on any ad whose message lives in the narration; it costs nothing but ffmpeg. Time them from ElevenLabs forced alignment against the existing mp3 (see `references/fal-api.md`), never by estimating, and offset every timestamp by the lead-in pad. Keep the `.ass` file in the ad folder so wording and position stay re-editable for free.
+ 
+ Show the user the final file. Offer the natural iterations: swap a line's VO take, repair one scene, re-run assembly (assembly is free — regeneration is not).
+ 
+--- a/references/fal-api.md
++++ b/references/fal-api.md
+@@ -22,7 +22,11 @@
+ { "prompt": "...", "image_size": "portrait_16_9" }
+ ```
+ 
+-`image_size` is an ENUM, not pixel dimensions (schema changed 2026-08: `"1024x1536"` now 422s). Valid: `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`, `landscape_4_3`, `landscape_16_9`, `auto`. Vertical ads use `portrait_16_9`.
++`image_size` is an ENUM, not pixel dimensions (schema changed 2026-08: `"1024x1536"` now 422s). Valid: `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`, `landscape_4_3`, `landscape_16_9`, `auto`.
++
++**Aspect contract — generate every still at the aspect the video model can emit.** Omni emits ONLY `9:16` or `16:9`, so stills must be created at `portrait_16_9` (→ Omni `9:16`) or `landscape_16_9` (→ Omni `16:9`). Pick one at gate 2 and use it for the style lock, every master, and every keyframe.
++
++Never generate stills at `square`, `*_4_3`, or `auto` and reframe them later: a reframing pass is a full re-render that puts every piece of label and signage text back at risk, and it is pure waste when the correct aspect was free at creation time. If a user supplies a source image at some other aspect (a 5:4 packshot, a square photo), the widen/reframe edit is unavoidable — but that is the only case where it is justified.
+ 
+ ### Masters & keyframes — `openai/gpt-image-2/edit`
+ 
+@@ -34,17 +38,47 @@
+ 
+ Reference order carries authority: masters first, previous still next, packshot always LAST.
+ 
+-### Clips — `google/gemini-omni-flash/reference-to-video`
++### Clips — `google/gemini-omni-flash/reference-to-video` (DEFAULT video model)
+ 
+ ```json
+-{ "prompt": "...", "image_urls": ["<still-N>", "<still-N+1>"], "duration": "4", "aspect_ratio": "9:16", "resolution": "720p" }
++{ "prompt": "...", "image_urls": ["<still-N>", "<still-N+1>"], "duration": 8, "aspect_ratio": "9:16" }
+ ```
+ 
+-There is no end-frame parameter — the second reference image is bound to the final frame by the prompt contract (see prompts.md). Duration stays "4": scene timing is enforced at assembly from measured VO durations, not at generation.
++Verified schema (2026-08):
++
++| Field | Type | Constraint |
++|---|---|---|
++| `prompt` | string | max 20000 chars; supports `<IMAGE_REF_0>`, `<IMAGE_REF_1>`… role tags |
++| `duration` | **integer** | **min 3, max 10**, default 8 — NOT a string, NOT an enum |
++| `aspect_ratio` | string | **only** `"16:9"` or `"9:16"`, default `16:9` |
++| `image_urls` | array | 1–10 URLs |
++
++There is no `resolution` field and no end-frame field. Output is 720p (1280×720 / 720×1280) regardless. `duration: 2` is rejected with `Input should be greater than or equal to 3` — the floor is real, so a beat shorter than 3s must be generated at 3s and time-remapped in ffmpeg.
++
++**The end frame is a PROMPT contract, and so is timing.** The last reference image is bound to the final frame by the wording in prompts.md, and Omni also honours in-prompt timing instructions ("within the first second… then for the remainder…"). This is the key difference from hard end-frame parameters on other models, which interpolate the change evenly across the whole clip and therefore cannot place a beat early.
++
++**Consequence: prefer ONE clip covering several beats over several stitched clips.** A single generation of "closes the book in the first 1.5s, then speaks to camera for the remainder" is cheaper than two clips, has no join seam, and needs no speed-ramping. Split into multiple clips only when the scenes are genuinely different setups. Every stitch you avoid is a framing pop you avoid.
+ 
+-Two facts learned in production (2026-08):
+-- **Omni clips contain their own AAC audio track.** Any downstream mux MUST use explicit stream mapping (`-map 0:v:0 -map 1:a:0`) or ffmpeg silently prefers the clip's audio over the narration — the symptom is an ad with no VO until the final still-held segment. assemble.sh now maps explicitly; keep that if you ever hand-roll ffmpeg here.
+-- Observed pricing: ~$0.13/second at 720p → ~$0.52 per 4s clip. Verify per session.
++Three facts learned in production (2026-08):
++- **Omni clips contain their own AAC audio track.** Any downstream mux MUST use explicit stream mapping (`-map 0:v:0 -map 1:a:0`) or ffmpeg silently prefers the clip's audio over the narration — the symptom is an ad with no VO until the final still-held segment. assemble.sh now maps explicitly; keep that if you ever hand-roll ffmpeg here. When lipsyncing, strip it outright with `-an`.
++- **Never speed-ramp a clip that carries dialogue.** Generating a beat long and running `setpts=PTS/N` to compress it produces unnaturally fast motion that desynchronises lipsync at the very moment speech begins. Generate at the duration you need.
++- Observed pricing: ~$0.13/second at 720p → ~$1.17 for a 9s clip. Verify per session.
++
++#### Choosing a specific voice (Omni cannot be told one)
++
++Omni synthesises its own speech and animates the mouth to *that*. There is **no audio input parameter** — you cannot hand it a voiceover. To ship a chosen voice:
++
++1. Generate the clip; strip its audio (`-an`).
++2. Generate the VO separately (ElevenLabs, below) and pad the lead-in silence to match when the character is ready to speak.
++3. Bind them with `fal-ai/sync-lipsync/v2`:
++
++```json
++{ "video_url": "...", "audio_url": "...", "model": "lipsync-2-pro", "sync_mode": "cut_off" }
++```
++
++`model`: `lipsync-2` ($3/min) or `lipsync-2-pro` ($5/min). Pro is worth it on stylised/clay faces, which are off-distribution for sync models; quote the tier you actually intend to use. `sync_mode`: `cut_off` | `loop` | `bounce` | `silence` | `remap`.
++
++Skipping the lipsync pass is a legitimate cheaper option — the mouth then moves to Omni's invented speech rather than the narration. Loose sync is a real claymation convention, but say so explicitly rather than shipping it silently.
+ 
+ ### Voiceover — ElevenLabs via FAL (stock voices)
+ 
+@@ -62,6 +96,23 @@
+   body: { "text": "...", "model_id": "eleven_v3" }
+ ```
+ 
++`tts_line.sh` takes this direct route only when **both** `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` are set. With the key but no voice id it silently falls back to FAL's stock voices — so a user who asked for a specific voice gets a different one with no error. Whenever the user names a voice, confirm `ELEVENLABS_VOICE_ID` is in the environment before generating, and resolve it to a name via `GET /v1/voices/<id>` so you can state which voice you actually used.
++
++Listing the account's voices (`GET /v1/voices`) is free and is the right way to offer a choice. `category` tells you what you are dealing with: `premade` and `generated` work through either route; `cloned` works ONLY on this direct route.
++
++#### Caption timing — forced alignment, not estimation
++
++To caption a line, align against the mp3 you already generated rather than guessing or regenerating:
++
++```
++POST https://api.elevenlabs.io/v1/forced-alignment
++  header: xi-api-key: $ELEVENLABS_API_KEY
++  multipart: file=@line-NN.mp3, text="<the exact line>"
++  → { characters: [...], words: [{text, start, end}, ...] }
++```
++
++Word-level start/end times against the *existing* take, so captions match the audio that is already lipsynced. Regenerating the VO to get timings would produce a different take and desynchronise the video. Add the lead-in pad offset to every timestamp.
++
+ ## Cost quoting
+ 
+ Before each paid batch print: `<count> × $<per-call> = $<total>` with prices read from the model pages this session. A typical 10-scene ad is ~13 images (1 lock + 2-3 masters + 10 stills, plus repairs) and 9 clips; clips dominate the total.
+--- a/references/prompts.md
++++ b/references/prompts.md
+@@ -85,6 +85,37 @@
+ 
+ The end-frame instruction is a PROMPT contract, not a model parameter — omni has no end-image field. It holds remarkably well when stated exactly this way.
+ 
++Omni also accepts inline role tags — `<IMAGE_REF_0>`, `<IMAGE_REF_1>` — which bind a reference to a named role more tightly than positional wording alone. Prefer them whenever a prompt refers to more than one reference.
++
++## Multi-beat clip (reference-to-video; references = start still, then end still)
++
++Because the end frame is a prompt contract rather than a parameter, Omni will also honour **when** a beat lands. That means one generation can carry an action AND a hold — no stitching, no seam, no speed-ramping. Use this instead of two clips whenever the camera setup does not change.
++
++```
++<IMAGE_REF_0> is the exact first frame of this clip: the animation must begin from it, unchanged, on frame one.
++Within the first [N] seconds, [the action beat: what the character does, in one concrete sentence].
++For the ENTIRE REMAINDER of the clip, from that moment to the final frame, [the hold beat: what continues — speaking to camera, idling, reacting]. [One clause naming what must NOT happen: never looks away, never re-opens the book, never stands.]
++The animation must end exactly matching <IMAGE_REF_1>.
++Stop-motion claymation feel: deliberate poses, handcrafted motion, locked-off camera, no camera shake, no zoom, no cut, no scene change. Keep character facial consistency. No character redesign. No facial feature changes. Keep every package's label design, lettering, and colors unchanged.
++```
++
++Make the END still depict the *hold* state, not the moment of change — if the character spends most of the clip with the book closed and talking, that is what `<IMAGE_REF_1>` should show. Binding the final frame to the hold state is what keeps the action early instead of smearing it across the whole clip.
++
++Then find the real handoff frame by inspecting the output (sample frames every ~0.5s) and pad the voiceover's lead-in silence to match. Never assume the beat landed exactly where the prompt asked.
++
++## Widening a supplied image to a usable aspect (image edit; reference = the user's image)
++
++Only when the user supplies a source image at an aspect Omni cannot emit. Never as a routine step — generate stills at the right aspect instead.
++
++```
++Handcrafted claymation frame, recomposed to a [16:9 / 9:16] format. Keep [the subject] centered and at the same scale, [doing what it is doing], exactly as in the supplied image.
++Extend the set naturally to [the left and right / above and below] to fill the frame: [name what plausibly continues there]. The newly revealed areas must match the existing set in material, palette, lighting, and style so the result looks like one continuous photographed miniature set.
++The supplied image is the ONLY authority for this character and this set. Reproduce exactly: [appearance clauses]. Reproduce every piece of lettering exactly and correctly spelled: [quote every readable string in the frame, verbatim]. Never redraw, restyle, approximate, or misspell any lettering.
++No new text, no extra signage, no watermark, no other person, no borders.
++```
++
++Quoting each readable string verbatim is the load-bearing part. Text in frame survives a widen pass far better when the prompt names it exactly than when it is referred to generically.
++
+ ## Outro clip (reference-to-video; reference = final still only)
+ 
+ There are N−1 transition clips for N scenes, which leaves the last narration line playing over a frozen still — and a held still reads as a rendering glitch, not a choice. Generate clip N as a single-reference idle animation of the final still (+1 clip cost; assemble.sh uses it automatically when `clips/clip-NN.mp4` exists):

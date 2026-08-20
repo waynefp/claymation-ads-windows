@@ -1,0 +1,4 @@
+# This repo is line-ending sensitive by design: windows-fixes.patch carries CRLF
+# context lines matching upstream's CRLF scripts, and `patch --binary` needs them
+# byte-exact. Disable all of git's text conversion.
+* -text

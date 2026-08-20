@@ -1,0 +1,11 @@
+# never commit credentials
+.env
+*.env
+# never commit generated media or client assets
+*.mp4
+*.mp3
+*.png
+*.jpg
+*.zip
+# restore.sh leftovers
+claymation-ads.replaced-*
