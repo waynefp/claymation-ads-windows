@@ -1,8 +1,8 @@
-# claymation-ads — Windows fixes + Gemini Omni defaults
+# claymation-ads — Windows fixes + a low-cost volume pipeline
 
 A patched build of **[claymation-ads](https://github.com/mikefutia/claymation-ads-claude-skill)**, the Claude Skill by [Mike Futia](https://www.skool.com/scale-ai) that turns a product image and an angle into a finished claymation video ad.
 
-All the pipeline design, prompt engineering, and consistency mechanics are Mike's work, released free to use and modify. This fork adds two Windows bug fixes and rewrites the default model stack around Gemini Omni, based on what actually broke in production.
+All the pipeline design, prompt engineering, and consistency mechanics are Mike's work, released free to use and modify. This fork adds two Windows bug fixes, corrects the model schemas, and documents a second pipeline for single-character talking pieces that costs about $0.33 per finished video instead of $1.90 — all based on what actually broke, and what actually worked, in production.
 
 **Start with [Mike's original](https://github.com/mikefutia/claymation-ads-claude-skill)** — it explains the five approval gates, the character-consistency mechanisms, and the cost model. This README only covers what differs.
 
@@ -31,7 +31,8 @@ The scripts are bash and run under **Git Bash**, not PowerShell. Restart your sh
 Environment (never commit these):
 
 ```
-FAL_KEY=...
+FAL_KEY=...                  # movement mode only
+KIE_API_KEY=...              # stills, and all of volume mode
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=...      # required if you want a specific voice
 ELEVENLABS_MODEL_ID=eleven_v3
