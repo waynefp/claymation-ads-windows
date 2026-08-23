@@ -38,6 +38,32 @@ Some model families have their own endpoints instead of the Market API:
    `"Your call frequency is too high"` — which is NOT a signal that a model does not exist.
    Re-probe anything that returned 429 before concluding anything from it.
 
+### Use `scripts/kie_run.sh`, not raw curl
+
+The client encodes every trap on this page. Same shape as `fal_run.sh`:
+
+```
+kie_run.sh credits
+kie_run.sh submit <model> <input.json> <job-name> <state-dir>
+kie_run.sh poll   <job-name> <state-dir> <out-file> [max-wait]
+kie_run.sh run    <model> <input.json> <job-name> <state-dir> <out-file> [max-wait]
+kie_run.sh status <job-name> <state-dir>
+```
+
+`<input.json>` holds ONLY the `input` object; the model is a separate argument.
+State is written to `<state-dir>/<name>.task.json` **before** the call returns.
+
+`run` exit codes: `0` done · `1` failed after one retry · `3` stuck.
+
+What it handles for you: 429 backoff; rejection-vs-queued discrimination (a rejection
+writes no state and costs nothing); double-decoding `resultJson`; cost reported as a
+credit delta; and **auto-retry on `fail` but never on stuck**.
+
+That last asymmetry is the important one. A failed job is not charged, so retrying is
+free. A stuck job is still alive server-side and some models bill at submit — resubmitting
+one pays twice for the same output. On stuck it exits 3 and prints the exact `poll` command
+to resume from disk, which works across sessions.
+
 ### Queue reliability
 
 Observed completion times for one 7s avatar job, same payload shape, across one session:

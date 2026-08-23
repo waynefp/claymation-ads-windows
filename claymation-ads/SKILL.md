@@ -126,10 +126,12 @@ consistent *with*. Skipping them saves two paid generations and loses nothing.
 Send each artifact as it lands. Quote before the still and before the clip; both are small,
 but the user should still see a number first.
 
-**Retry handling is part of the job, not an edge case.** Kie's queue is erratic — observed
-50s to 30 minutes for identical payloads, with occasional server-side timeouts. Record every
-`taskId` to disk in the same call that submits it (there is no task-list endpoint to recover
-it), poll with a generous ceiling, and resubmit once on failure. Failed jobs are not charged.
+**Use `scripts/kie_run.sh` for every Kie call** — `kie_run.sh run <model> <input.json>
+<name> <state-dir> <out>`. It records the `taskId` to disk before returning (Kie has no
+task-list endpoint, so a lost id is lost money), backs off on the rate limit, reports cost
+as a credit delta, retries once on failure, and on a stuck job exits 3 with the `poll`
+command to resume — rather than resubmitting and paying twice. Kie's queue is erratic:
+observed 50s to 30 minutes for identical payloads. Slow is normal and is not failure.
 
 
 ## Movement / multi-scene workflow (five gates)

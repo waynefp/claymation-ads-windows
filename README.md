@@ -85,6 +85,14 @@ that gap at any price.
 Stills come from Kie in **both** modes — cheaper than FAL ($0.05 vs ~$0.08) and far higher
 resolution (2048×1152 vs 1088×608). FAL accepts Kie's hosted URLs as reference inputs.
 
+New script: **`scripts/kie_run.sh`** — a Kie queue client shaped like `fal_run.sh`
+(`credits` / `submit` / `poll` / `run` / `status`). It writes the `taskId` to disk before
+returning, backs off on the 20-req/10s rate limit, tells a free rejection apart from a
+billable queued job, reports cost as a credit delta, and retries once on failure — but
+**never on a stuck job**, since failed jobs are free while stuck ones are alive
+server-side and some models bill at submit. On stuck it exits 3 and prints the `poll`
+command to resume from disk, which works across sessions.
+
 New reference: **`references/kie-api.md`** — verified model IDs and prices, the four
 operational traps (no cancel endpoint, no task-list endpoint, inconsistent charge timing,
 a 20-req/10s rate limit that masquerades as "model not found"), and measured queue times.
