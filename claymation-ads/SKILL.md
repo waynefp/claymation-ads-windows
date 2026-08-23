@@ -1,24 +1,62 @@
 ---
 name: claymation-ads
-description: Produce a finished AI claymation video ad end-to-end from a product image and an angle, using a FAL API key — planned script, approved character masters, chained keyframe stills, per-line voiceover, gemini-omni clip animation, optional lipsync to a chosen voice, and ffmpeg assembly into one finished MP4 (9:16 or 16:9). Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
+description: Produce finished AI claymation videos end-to-end — either a single talking-character piece (one still plus kling-ai-avatar, ~$0.33) or a multi-scene ad with directed action (gemini-omni plus sync-lipsync). Covers script, character stills via gpt-image-2, per-line voiceover in a chosen ElevenLabs voice, animation, burned-in captions, and ffmpeg assembly into one finished MP4 (9:16 or 16:9). Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
 ---
 
 # Claymation Ads
 
 Turn a product image plus an angle into a finished vertical claymation video ad. The pipeline is a chain of cheap, reviewable artifacts — each stage's output anchors the next, and the user approves at five gates before money concentrates. Everything deterministic (API calls, audio math, assembly) lives in `scripts/`; your job is planning, prompt assembly, quality judgment, and stopping at the gates.
 
-**Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** — it has the payload shapes and model routes.
+**Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** and **`references/kie-api.md` before the first Kie call** — they have the payload shapes, model routes, and the operational traps for each provider.
 
-## Default stack
+## Two pipelines — pick one at gate 1
 
-| Role | Model | Notes |
-|---|---|---|
-| Images | `openai/gpt-image-2` (`/edit` for references) | style lock, masters, keyframes |
-| Video | `google/gemini-omni-flash/reference-to-video` | 720p, `duration` int 3–10, `aspect_ratio` **only** `9:16` or `16:9` |
-| Voice | ElevenLabs — direct API when the user names a voice, via FAL for stock | clones resolve ONLY on the direct route |
-| Lipsync | `fal-ai/sync-lipsync/v2` | only when a character speaks on camera |
+Which pipeline you are building decides everything downstream, so settle it before planning.
 
-Use these unless the user asks otherwise. The one rule binding them together: **the video model emits only 9:16 and 16:9, so every still must be generated at that aspect from the start.** Choose it at gate 2. Reframing later is a full re-render, costs an extra generation, and degrades any label or signage text in frame.
+### Volume mode — a character speaks to camera, no gesture
+
+One still, one call. `kling/ai-avatar-standard` animates the face AND embeds your chosen
+voice, so there is no separate lipsync step. **~$0.33 per finished video, ~5 minutes.**
+This is the right default for recurring content — a daily thought, a series, anything where
+the piece is someone talking to you.
+
+| Step | Provider | Model | Cost |
+|---|---|---|---|
+| Still | Kie | `gpt-image-2-image-to-image` @ 2K | $0.05 |
+| Voice | ElevenLabs direct | `eleven_v3` | ~$0.00 |
+| Video + lipsync | Kie | `kling/ai-avatar-standard` | $0.04/s |
+| Lead-in, captions, loudness | local | ffmpeg | free |
+
+Variety comes from the **still**, never from the motion — different settings, seasons,
+times of day, props. The image model follows prompts beautifully and costs $0.05; the
+avatar model cannot choreograph. Put the creative variation where it is cheap and reliable.
+
+### Movement mode — the character performs a discrete action
+
+Needed when something must *happen* (closing a book, standing up, picking something up).
+**~$1.90 per finished video.** Roughly 6× volume mode, so reserve it for hero pieces.
+
+| Step | Provider | Model | Cost |
+|---|---|---|---|
+| Stills (start + end state) | Kie | `gpt-image-2-image-to-image` @ 2K | $0.10 |
+| Voice | ElevenLabs direct | `eleven_v3` | ~$0.00 |
+| Motion | FAL | `google/gemini-omni-flash/reference-to-video` | $0.13/s |
+| Lipsync | FAL | `fal-ai/sync-lipsync/v2` (`lipsync-2-pro` on clay) | $3–5/min |
+| Assembly, captions | local | ffmpeg | free |
+
+**Directed motion plus a chosen voice is only possible on FAL.** Omni takes prompt
+direction but no audio; Kie's avatar models take audio but only animate the face, and its
+promptable video model (Seedance) cannot accept reference audio and frame anchors together.
+Nothing on Kie closes that gap at any price — this is structural, not a pricing question.
+
+Stills come from Kie in **both** modes: cheaper ($0.05 vs ~$0.08) and far higher resolution
+(2048×1152 vs 1088×608), and FAL accepts Kie's hosted URLs as reference inputs.
+
+### The aspect rule, either mode
+
+FAL's Omni emits **only** `9:16` or `16:9`. Choose at gate 2 and generate every still at
+that aspect (`portrait_16_9` / `landscape_16_9` on FAL, `aspect_ratio` on Kie). Reframing
+later is a full re-render that costs a generation and degrades any text in frame.
 
 ## Why this order works (understand this before deviating)
 
@@ -35,7 +73,8 @@ Voiceover is generated per-line BEFORE the clips, so scene timing comes from mea
 ## Requirements
 
 - `FAL_KEY` in the environment. If missing, say so up front and ask the user to `export FAL_KEY=...` (keys at fal.ai/dashboard/keys) — but keep going: gates 1 and 2 are free and need no key. The key becomes a hard requirement at gate 3, where the first paid call happens. Never ask them to paste the key into chat. If auth fails with a key that looks right, check for invisible characters (BOM `U+FEFF`) — keys copy-pasted from files carry them and the corruption is invisible in editors.
-- `ffmpeg` and `jq` installed (`brew install ffmpeg jq`).
+- `KIE_API_KEY` for volume mode and for all stills (keys at kie.ai). Volume mode needs only this key plus ElevenLabs.
+- `ffmpeg` and `jq` installed (`brew install ffmpeg jq`; on Windows `winget install Gyan.FFmpeg jqlang.jq`, and run the scripts under Git Bash).
 - A product image file from the user.
 - Optional: `ELEVENLABS_API_KEY` if the user has their own cloned voice — FAL's ElevenLabs endpoints run on FAL's account, so a user's personal voice clone can NOT resolve through FAL. Stock voices work through FAL; clones need the direct key.
 
@@ -57,6 +96,43 @@ All state lives in one folder per ad so any session can resume mid-pipeline:
 On invocation, check for an existing folder and resume from the first missing artifact rather than starting over.
 
 ## The workflow
+
+**Volume mode uses the compact flow below. Movement mode and any multi-scene ad use the five gates after it.**
+
+## Volume mode workflow
+
+No style lock, no masters, no chain — there is one scene, so there is nothing to stay
+consistent *with*. Skipping them saves two paid generations and loses nothing.
+
+1. **Brief, one paragraph.** Who is speaking, the line they say, the setting. Approve before spending.
+2. **Voiceover first**, via `scripts/tts_line.sh`. Its measured duration drives every later
+   timing decision. If the user named a voice, confirm `ELEVENLABS_VOICE_ID` is set — without
+   it the script silently falls back to a FAL stock voice and no error is raised.
+3. **Still**, `gpt-image-2-image-to-image` at `resolution: "2K"`, using the user's character
+   art as the identity authority. Obey both still-design rules in `prompts.md`: **settled
+   hands** and **face large and near-frontal**. Put any ambient element that should move —
+   steam, firelight, a curtain — into the still. Show it and get approval; it is $0.05 to redo
+   and it decides everything downstream.
+4. **Animate**, `kling/ai-avatar-standard`, using the four-clause prompt recipe in
+   `prompts.md`. The restraint clause is not optional — without it the delivery reads as an
+   over-articulating puppet.
+5. **Lead-in.** The output starts speaking on frame one, which reads as a broken video. Hold
+   the first frame ~0.6s and delay the audio to match (exact ffmpeg in `prompts.md`).
+6. **Captions**, timed from ElevenLabs forced alignment against the existing mp3, every
+   timestamp offset by the lead-in. Autoplay is muted on landing pages, so a voiceover-only
+   piece is silent mouth movement without them.
+7. **Normalize** to -14 LUFS and deliver.
+
+Send each artifact as it lands. Quote before the still and before the clip; both are small,
+but the user should still see a number first.
+
+**Retry handling is part of the job, not an edge case.** Kie's queue is erratic — observed
+50s to 30 minutes for identical payloads, with occasional server-side timeouts. Record every
+`taskId` to disk in the same call that submits it (there is no task-list endpoint to recover
+it), poll with a generous ceiling, and resubmit once on failure. Failed jobs are not charged.
+
+
+## Movement / multi-scene workflow (five gates)
 
 ### Gate 1 — Brief
 

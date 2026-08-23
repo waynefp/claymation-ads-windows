@@ -74,54 +74,299 @@
 +echo "$DIR/contact-sheet.png"
 --- a/SKILL.md
 +++ b/SKILL.md
-@@ -1,6 +1,6 @@
- ---
- name: claymation-ads
+@@ -1,121 +1,217 @@
+----
+-name: claymation-ads
 -description: Produce a finished AI claymation video ad end-to-end from a product image and an angle, using a FAL API key — planned script, approved character masters, chained keyframe stills, per-line voiceover, transition-clip animation, and ffmpeg assembly into one vertical MP4. Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
-+description: Produce a finished AI claymation video ad end-to-end from a product image and an angle, using a FAL API key — planned script, approved character masters, chained keyframe stills, per-line voiceover, gemini-omni clip animation, optional lipsync to a chosen voice, and ffmpeg assembly into one finished MP4 (9:16 or 16:9). Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
- ---
- 
- # Claymation Ads
-@@ -9,6 +9,17 @@
- 
- **Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** — it has the payload shapes and model routes.
- 
-+## Default stack
-+
-+| Role | Model | Notes |
-+|---|---|---|
-+| Images | `openai/gpt-image-2` (`/edit` for references) | style lock, masters, keyframes |
-+| Video | `google/gemini-omni-flash/reference-to-video` | 720p, `duration` int 3–10, `aspect_ratio` **only** `9:16` or `16:9` |
-+| Voice | ElevenLabs — direct API when the user names a voice, via FAL for stock | clones resolve ONLY on the direct route |
-+| Lipsync | `fal-ai/sync-lipsync/v2` | only when a character speaks on camera |
-+
-+Use these unless the user asks otherwise. The one rule binding them together: **the video model emits only 9:16 and 16:9, so every still must be generated at that aspect from the start.** Choose it at gate 2. Reframing later is a full re-render, costs an extra generation, and degrades any label or signage text in frame.
-+
- ## Why this order works (understand this before deviating)
- 
- Character consistency in AI video comes from three mechanisms stacked, none sufficient alone:
-@@ -55,10 +66,11 @@
- 
- Write `plan.json` (schema in `references/prompts.md`):
- 
+----
+-
+-# Claymation Ads
+-
+-Turn a product image plus an angle into a finished vertical claymation video ad. The pipeline is a chain of cheap, reviewable artifacts — each stage's output anchors the next, and the user approves at five gates before money concentrates. Everything deterministic (API calls, audio math, assembly) lives in `scripts/`; your job is planning, prompt assembly, quality judgment, and stopping at the gates.
+-
+-**Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** — it has the payload shapes and model routes.
+-
+-## Why this order works (understand this before deviating)
+-
+-Character consistency in AI video comes from three mechanisms stacked, none sufficient alone:
+-
+-1. **Approved masters ride every image.** A style lock (the world: material, palette, lighting, sets) and one master reference per recurring character are generated FIRST and attached as reference images to every later generation. Without this, a 10-scene ad drifts into several different protagonists.
+-2. **The chain.** Each scene still also references the previous scene's still, so adjacent frames agree locally.
+-3. **The clip contract.** Each video clip is generated from a PAIR of stills (this scene's + the next scene's) with a prompt contract that frame one is the first image unchanged and the final frame matches the second image. Clips therefore join seamlessly — clip N ends on the exact frame clip N+1 begins.
+-
+-And one rule that outranks all three: **the real product photo is the only product authority.** Never generate a "master" of the product; attach the user's actual packshot to every image that shows the product. Generated product references degrade label text within two generations ("Testosterone" becomes "Testasterone" — this is the single most common failure in AI product ads).
+-
+-Voiceover is generated per-line BEFORE the clips, so scene timing comes from measured audio, not estimates. This is why the final cuts land exactly on the narration with zero timing correction.
+-
+-## Requirements
+-
+-- `FAL_KEY` in the environment. If missing, say so up front and ask the user to `export FAL_KEY=...` (keys at fal.ai/dashboard/keys) — but keep going: gates 1 and 2 are free and need no key. The key becomes a hard requirement at gate 3, where the first paid call happens. Never ask them to paste the key into chat. If auth fails with a key that looks right, check for invisible characters (BOM `U+FEFF`) — keys copy-pasted from files carry them and the corruption is invisible in editors.
+-- `ffmpeg` and `jq` installed (`brew install ffmpeg jq`).
+-- A product image file from the user.
+-- Optional: `ELEVENLABS_API_KEY` if the user has their own cloned voice — FAL's ElevenLabs endpoints run on FAL's account, so a user's personal voice clone can NOT resolve through FAL. Stock voices work through FAL; clones need the direct key.
+-
+-## Project folder
+-
+-All state lives in one folder per ad so any session can resume mid-pipeline:
+-
+-```
+-<ad-name>/
+-  brief.md          # product, angle, audience, packshot path
+-  plan.json         # script lines, scenes, cast, visual world
+-  refs/             # style-lock.png, <subject>.png masters
+-  stills/           # scene-01.png ... scene-NN.png
+-  vo/               # line-01.mp3 ... + durations.json
+-  clips/            # clip-01.mp4 ... (N-1 clips)
+-  final.mp4
+-```
+-
+-On invocation, check for an existing folder and resume from the first missing artifact rather than starting over.
+-
+-## The workflow
+-
+-### Gate 1 — Brief
+-
+-Collect: product name, what it does, the ad's angle (the one idea the ad argues), target audience, and the packshot image path. Write `brief.md`. Keep it under a page. Show it and get approval before planning.
+-
+-### Gate 2 — Plan and script
+-
+-Write `plan.json` (schema in `references/prompts.md`):
+-
 -- **Script**: 8–12 narration lines. Each line ≤10 words — this is a hard constraint, because each line becomes one scene and one voiceover segment, and its clip is generated at 4 seconds; a line that reads longer than ~4s breaks assembly. Short declarative sentences are also just better ad copy.
-+- **Aspect**: `9:16` (vertical — feed ads, mobile-first landing pages) or `16:9` (horizontal — desktop embeds, YouTube pre-roll). These are the ONLY two the video model emits, so this choice is a hard contract: it fixes the `image_size` of every still (`portrait_16_9` / `landscape_16_9`) and the `aspect_ratio` of every clip. Decide it here and never reframe later — a reframing pass re-renders the whole image and puts all label and signage text back at risk.
-+- **Script**: 8–12 narration lines. Each line ≤10 words — this is a hard constraint, because each line becomes one scene and one voiceover segment; a line that reads longer than its clip breaks assembly. Short declarative sentences are also just better ad copy.
- - **Cast**: 1–3 recurring non-product subjects, each with name, kind, and appearance description. Personify boldly — an organ, a hormone, a problem can be a character. Do NOT cast the product.
- - **Visual world**: material system, palette, lighting, set language, shared character construction grammar (hand style, eye design, mouth rules), negative constraints.
+-- **Cast**: 1–3 recurring non-product subjects, each with name, kind, and appearance description. Personify boldly — an organ, a hormone, a problem can be a character. Do NOT cast the product.
+-- **Visual world**: material system, palette, lighting, set language, shared character construction grammar (hand style, eye design, mouth rules), negative constraints.
 -- **Scenes**: one per line, each with an image prompt built per the keyframe template.
-+- **Scenes**: one per line, each with an image prompt built per the keyframe template. Group consecutive beats that share a camera setup — they can become ONE clip rather than several (see gate 5).
- 
- Present the script and cast list for approval. This is the highest-leverage review in the whole pipeline — a weak line here costs money at every later stage.
- 
-@@ -81,14 +93,22 @@
- 
- ### Gate 5 — Voiceover, then clips (the expensive gate)
- 
+-
+-Present the script and cast list for approval. This is the highest-leverage review in the whole pipeline — a weak line here costs money at every later stage.
+-
+-### Gate 3 — Style lock and masters (~$0.05–0.30)
+-
+-1. Generate the style lock via text-to-image. CRITICAL: the style-lock prompt must never describe any character, even though the plan contains character descriptions — describing a character inside a "show no characters" prompt reliably leaks the character into the frame. Use the template exactly.
+-2. Generate each subject master via image edit, referencing the style lock. Masters get the shared construction grammar plus their own appearance.
+-3. Show the images. The user approves, or gives a revision note (append it as `Revision request: ...` and regenerate that artifact only).
+-
+-Approved masters are frozen — from here on they are reference inputs, never regenerated casually. Regenerating a master after stills exist means regenerating every still that used it.
+-
+-### Gate 4 — Keyframe stills (~$0.04 × N)
+-
+-Generate scene stills IN ORDER (the chain requires it — scene N references scene N−1):
+-
+-- Scene 1: edit call, references = [all masters, packshot if product visible].
+-- Scene N: edit call, references = [all masters, scene N−1 still, packshot if product visible].
+-
+-Quote the total price before starting. After the run, build a contact sheet (`scripts/contact_sheet.sh`) and show it — a strip of thumbnails is how a human catches the one off-model frame in seconds. Repair individual scenes with a revision note; a repaired scene N invalidates only scenes after it if drift is visible, not automatically.
+-
+-### Gate 5 — Voiceover, then clips (the expensive gate)
+-
 -1. **VO first**: one TTS call per narration line via `scripts/tts_line.sh`, which also probes each mp3's real duration into `vo/durations.json`. Cheap — no gate needed, but play one line back so the user confirms the voice before 10 more.
 -2. **Quote the clips**: N−1 clips at the video model's price. This is most of the ad's cost — state the number and get explicit approval.
 -3. Generate clip K from stills [K, K+1] with the transition contract prompt (template in `references/prompts.md`), duration 4s.
 -4. **Generate the outro clip N too** (single-reference idle animation of the final still — template in `references/prompts.md`) and include it in the quote. Without it the last narration line plays over a frozen still, which clients reliably read as a bug. assemble.sh picks it up automatically.
+-
+-### Assembly (free)
+-
+-Run `scripts/assemble.sh <ad-folder>`. Per scene it trims the clip to that line's measured VO duration (freeze-holding the last frame if the VO runs past the clip), muxes the narration, concats everything, and normalizes loudness to -14 LUFS. Optional: pass a music bed file to duck it under the narration. Output: `final.mp4`, 9:16, ready to post.
+-
+-Show the user the final file. Offer the natural iterations: swap a line's VO take, repair one scene, re-run assembly (assembly is free — regeneration is not).
+-
+-## Execution environment (read before the first generation)
+-
+-Skill provisioning may strip the executable bit from `scripts/*.sh` — copy them into the project folder and `chmod +x` there (this also survives skill updates mid-project). Invoke with `bash script.sh` if in doubt; tts_line.sh's internal fal_run.sh call is already bash-wrapped for this reason.
+-
+-**Send every artifact as it lands (default behavior):** immediately after each successful poll — style lock, each master, each scene still, each clip, the final — send that file to the user inline before submitting the next generation. Never batch artifacts up for a later reveal; the user watching each one pop onto the screen as it completes is part of the product (these runs are often screen-recorded for demos). The review gates still exist on top of this: the contact sheet, voice sample, and cost quotes remain the explicit stop-and-approve moments.
+-
+-Each image or clip generation takes 1–3 minutes at the provider. Two rules keep that survivable in any environment:
+-
+-1. **One generation per tool call, always in the foreground.** Never loop several generations inside one bash invocation — a chain of ten 2-minute jobs inside one call will hit the platform's tool timeout and die mid-batch. The chain is sequential anyway; one call per scene costs nothing and survives everything.
+-2. **Never background the work (`nohup`, `&`).** Sandboxed environments reap orphaned processes, and you lose the job handle when they do. You don't need a local background process — FAL's queue IS the background: the job runs server-side and survives anything that happens to your shell. When a single generation might outlive a tool call (short-timeout platforms like claude.ai chat), use the split flow:
+-
+-```
+-scripts/fal_run.sh submit <model> payload.json scene-04 <ad>/jobs   # returns immediately
+-scripts/fal_run.sh poll scene-04 <ad>/jobs stills/scene-04.png      # exit 0 done · 2 still running (call again) · 1 failed
+-```
+-
+-Job state persists in `<ad>/jobs/`, so polling resumes across tool calls and even across sessions. In Claude Code (bash timeouts up to 10 minutes), the one-shot form is fine for single generations; the submit/poll split is still the safer habit for clips.
+-
+-## Cost discipline
+-
+-Before every paid step, print what it costs — image count × image price, clip count × clip price — using current prices from the model pages (see `references/fal-api.md`; prices change, so verify once per session, not per call). Never fire a batch the user hasn't seen a number for. Track actual spend in the project folder as you go; report the total at the end. A typical 10-scene ad: ~13 images + 9 clips + 10 TTS lines.
+-
+-## Failure handling
+-
+-- FAL queue jobs can fail or hang: `scripts/fal_run.sh` times out and reports; retry once, then show the user the error rather than burning retries.
+-- If a generated image violates its contract (character in the style lock, garbled label, wrong character), regenerate with a revision note naming the violation — don't accept and hope the next stage fixes it. Later stages amplify, never repair.
+-- If a param name is rejected by a model, check the model's page at fal.ai for the current schema before retrying — `references/fal-api.md` payloads are a starting point, not gospel.
++---
++name: claymation-ads
++description: Produce finished AI claymation videos end-to-end — either a single talking-character piece (one still plus kling-ai-avatar, ~$0.33) or a multi-scene ad with directed action (gemini-omni plus sync-lipsync). Covers script, character stills via gpt-image-2, per-line voiceover in a chosen ElevenLabs voice, animation, burned-in captions, and ffmpeg assembly into one finished MP4 (9:16 or 16:9). Use this skill whenever the user wants to create a claymation ad, an animated story ad, an AI video ad in a clay/stop-motion/Pixar-like style, turn a product photo into an animated ad, or mentions making video ads with FAL, gpt-image-2, or omni video — even if they only say "make me an animated ad for my product."
++---
++
++# Claymation Ads
++
++Turn a product image plus an angle into a finished vertical claymation video ad. The pipeline is a chain of cheap, reviewable artifacts — each stage's output anchors the next, and the user approves at five gates before money concentrates. Everything deterministic (API calls, audio math, assembly) lives in `scripts/`; your job is planning, prompt assembly, quality judgment, and stopping at the gates.
++
++**Read `references/prompts.md` before writing any generation prompt** — the templates there encode hard-won consistency rules. **Read `references/fal-api.md` before the first FAL call** and **`references/kie-api.md` before the first Kie call** — they have the payload shapes, model routes, and the operational traps for each provider.
++
++## Two pipelines — pick one at gate 1
++
++Which pipeline you are building decides everything downstream, so settle it before planning.
++
++### Volume mode — a character speaks to camera, no gesture
++
++One still, one call. `kling/ai-avatar-standard` animates the face AND embeds your chosen
++voice, so there is no separate lipsync step. **~$0.33 per finished video, ~5 minutes.**
++This is the right default for recurring content — a daily thought, a series, anything where
++the piece is someone talking to you.
++
++| Step | Provider | Model | Cost |
++|---|---|---|---|
++| Still | Kie | `gpt-image-2-image-to-image` @ 2K | $0.05 |
++| Voice | ElevenLabs direct | `eleven_v3` | ~$0.00 |
++| Video + lipsync | Kie | `kling/ai-avatar-standard` | $0.04/s |
++| Lead-in, captions, loudness | local | ffmpeg | free |
++
++Variety comes from the **still**, never from the motion — different settings, seasons,
++times of day, props. The image model follows prompts beautifully and costs $0.05; the
++avatar model cannot choreograph. Put the creative variation where it is cheap and reliable.
++
++### Movement mode — the character performs a discrete action
++
++Needed when something must *happen* (closing a book, standing up, picking something up).
++**~$1.90 per finished video.** Roughly 6× volume mode, so reserve it for hero pieces.
++
++| Step | Provider | Model | Cost |
++|---|---|---|---|
++| Stills (start + end state) | Kie | `gpt-image-2-image-to-image` @ 2K | $0.10 |
++| Voice | ElevenLabs direct | `eleven_v3` | ~$0.00 |
++| Motion | FAL | `google/gemini-omni-flash/reference-to-video` | $0.13/s |
++| Lipsync | FAL | `fal-ai/sync-lipsync/v2` (`lipsync-2-pro` on clay) | $3–5/min |
++| Assembly, captions | local | ffmpeg | free |
++
++**Directed motion plus a chosen voice is only possible on FAL.** Omni takes prompt
++direction but no audio; Kie's avatar models take audio but only animate the face, and its
++promptable video model (Seedance) cannot accept reference audio and frame anchors together.
++Nothing on Kie closes that gap at any price — this is structural, not a pricing question.
++
++Stills come from Kie in **both** modes: cheaper ($0.05 vs ~$0.08) and far higher resolution
++(2048×1152 vs 1088×608), and FAL accepts Kie's hosted URLs as reference inputs.
++
++### The aspect rule, either mode
++
++FAL's Omni emits **only** `9:16` or `16:9`. Choose at gate 2 and generate every still at
++that aspect (`portrait_16_9` / `landscape_16_9` on FAL, `aspect_ratio` on Kie). Reframing
++later is a full re-render that costs a generation and degrades any text in frame.
++
++## Why this order works (understand this before deviating)
++
++Character consistency in AI video comes from three mechanisms stacked, none sufficient alone:
++
++1. **Approved masters ride every image.** A style lock (the world: material, palette, lighting, sets) and one master reference per recurring character are generated FIRST and attached as reference images to every later generation. Without this, a 10-scene ad drifts into several different protagonists.
++2. **The chain.** Each scene still also references the previous scene's still, so adjacent frames agree locally.
++3. **The clip contract.** Each video clip is generated from a PAIR of stills (this scene's + the next scene's) with a prompt contract that frame one is the first image unchanged and the final frame matches the second image. Clips therefore join seamlessly — clip N ends on the exact frame clip N+1 begins.
++
++And one rule that outranks all three: **the real product photo is the only product authority.** Never generate a "master" of the product; attach the user's actual packshot to every image that shows the product. Generated product references degrade label text within two generations ("Testosterone" becomes "Testasterone" — this is the single most common failure in AI product ads).
++
++Voiceover is generated per-line BEFORE the clips, so scene timing comes from measured audio, not estimates. This is why the final cuts land exactly on the narration with zero timing correction.
++
++## Requirements
++
++- `FAL_KEY` in the environment. If missing, say so up front and ask the user to `export FAL_KEY=...` (keys at fal.ai/dashboard/keys) — but keep going: gates 1 and 2 are free and need no key. The key becomes a hard requirement at gate 3, where the first paid call happens. Never ask them to paste the key into chat. If auth fails with a key that looks right, check for invisible characters (BOM `U+FEFF`) — keys copy-pasted from files carry them and the corruption is invisible in editors.
++- `KIE_API_KEY` for volume mode and for all stills (keys at kie.ai). Volume mode needs only this key plus ElevenLabs.
++- `ffmpeg` and `jq` installed (`brew install ffmpeg jq`; on Windows `winget install Gyan.FFmpeg jqlang.jq`, and run the scripts under Git Bash).
++- A product image file from the user.
++- Optional: `ELEVENLABS_API_KEY` if the user has their own cloned voice — FAL's ElevenLabs endpoints run on FAL's account, so a user's personal voice clone can NOT resolve through FAL. Stock voices work through FAL; clones need the direct key.
++
++## Project folder
++
++All state lives in one folder per ad so any session can resume mid-pipeline:
++
++```
++<ad-name>/
++  brief.md          # product, angle, audience, packshot path
++  plan.json         # script lines, scenes, cast, visual world
++  refs/             # style-lock.png, <subject>.png masters
++  stills/           # scene-01.png ... scene-NN.png
++  vo/               # line-01.mp3 ... + durations.json
++  clips/            # clip-01.mp4 ... (N-1 clips)
++  final.mp4
++```
++
++On invocation, check for an existing folder and resume from the first missing artifact rather than starting over.
++
++## The workflow
++
++**Volume mode uses the compact flow below. Movement mode and any multi-scene ad use the five gates after it.**
++
++## Volume mode workflow
++
++No style lock, no masters, no chain — there is one scene, so there is nothing to stay
++consistent *with*. Skipping them saves two paid generations and loses nothing.
++
++1. **Brief, one paragraph.** Who is speaking, the line they say, the setting. Approve before spending.
++2. **Voiceover first**, via `scripts/tts_line.sh`. Its measured duration drives every later
++   timing decision. If the user named a voice, confirm `ELEVENLABS_VOICE_ID` is set — without
++   it the script silently falls back to a FAL stock voice and no error is raised.
++3. **Still**, `gpt-image-2-image-to-image` at `resolution: "2K"`, using the user's character
++   art as the identity authority. Obey both still-design rules in `prompts.md`: **settled
++   hands** and **face large and near-frontal**. Put any ambient element that should move —
++   steam, firelight, a curtain — into the still. Show it and get approval; it is $0.05 to redo
++   and it decides everything downstream.
++4. **Animate**, `kling/ai-avatar-standard`, using the four-clause prompt recipe in
++   `prompts.md`. The restraint clause is not optional — without it the delivery reads as an
++   over-articulating puppet.
++5. **Lead-in.** The output starts speaking on frame one, which reads as a broken video. Hold
++   the first frame ~0.6s and delay the audio to match (exact ffmpeg in `prompts.md`).
++6. **Captions**, timed from ElevenLabs forced alignment against the existing mp3, every
++   timestamp offset by the lead-in. Autoplay is muted on landing pages, so a voiceover-only
++   piece is silent mouth movement without them.
++7. **Normalize** to -14 LUFS and deliver.
++
++Send each artifact as it lands. Quote before the still and before the clip; both are small,
++but the user should still see a number first.
++
++**Retry handling is part of the job, not an edge case.** Kie's queue is erratic — observed
++50s to 30 minutes for identical payloads, with occasional server-side timeouts. Record every
++`taskId` to disk in the same call that submits it (there is no task-list endpoint to recover
++it), poll with a generous ceiling, and resubmit once on failure. Failed jobs are not charged.
++
++
++## Movement / multi-scene workflow (five gates)
++
++### Gate 1 — Brief
++
++Collect: product name, what it does, the ad's angle (the one idea the ad argues), target audience, and the packshot image path. Write `brief.md`. Keep it under a page. Show it and get approval before planning.
++
++### Gate 2 — Plan and script
++
++Write `plan.json` (schema in `references/prompts.md`):
++
++- **Aspect**: `9:16` (vertical — feed ads, mobile-first landing pages) or `16:9` (horizontal — desktop embeds, YouTube pre-roll). These are the ONLY two the video model emits, so this choice is a hard contract: it fixes the `image_size` of every still (`portrait_16_9` / `landscape_16_9`) and the `aspect_ratio` of every clip. Decide it here and never reframe later — a reframing pass re-renders the whole image and puts all label and signage text back at risk.
++- **Script**: 8–12 narration lines. Each line ≤10 words — this is a hard constraint, because each line becomes one scene and one voiceover segment; a line that reads longer than its clip breaks assembly. Short declarative sentences are also just better ad copy.
++- **Cast**: 1–3 recurring non-product subjects, each with name, kind, and appearance description. Personify boldly — an organ, a hormone, a problem can be a character. Do NOT cast the product.
++- **Visual world**: material system, palette, lighting, set language, shared character construction grammar (hand style, eye design, mouth rules), negative constraints.
++- **Scenes**: one per line, each with an image prompt built per the keyframe template. Group consecutive beats that share a camera setup — they can become ONE clip rather than several (see gate 5).
++
++Present the script and cast list for approval. This is the highest-leverage review in the whole pipeline — a weak line here costs money at every later stage.
++
++### Gate 3 — Style lock and masters (~$0.05–0.30)
++
++1. Generate the style lock via text-to-image. CRITICAL: the style-lock prompt must never describe any character, even though the plan contains character descriptions — describing a character inside a "show no characters" prompt reliably leaks the character into the frame. Use the template exactly.
++2. Generate each subject master via image edit, referencing the style lock. Masters get the shared construction grammar plus their own appearance.
++3. Show the images. The user approves, or gives a revision note (append it as `Revision request: ...` and regenerate that artifact only).
++
++Approved masters are frozen — from here on they are reference inputs, never regenerated casually. Regenerating a master after stills exist means regenerating every still that used it.
++
++### Gate 4 — Keyframe stills (~$0.04 × N)
++
++Generate scene stills IN ORDER (the chain requires it — scene N references scene N−1):
++
++- Scene 1: edit call, references = [all masters, packshot if product visible].
++- Scene N: edit call, references = [all masters, scene N−1 still, packshot if product visible].
++
++Quote the total price before starting. After the run, build a contact sheet (`scripts/contact_sheet.sh`) and show it — a strip of thumbnails is how a human catches the one off-model frame in seconds. Repair individual scenes with a revision note; a repaired scene N invalidates only scenes after it if drift is visible, not automatically.
++
++### Gate 5 — Voiceover, then clips (the expensive gate)
++
 +Default video model: **`google/gemini-omni-flash/reference-to-video`**. Schema and constraints in `references/fal-api.md` — read it before the first clip call.
 +
 +1. **VO first**: one TTS call per narration line via `scripts/tts_line.sh`, which also probes each mp3's real duration into `vo/durations.json`. Cheap — no gate needed, but play one line back so the user confirms the voice before 10 more. If the user named a specific voice, verify `ELEVENLABS_VOICE_ID` is set first: without it the script silently uses a FAL stock voice instead, with no error.
@@ -130,18 +375,44 @@
 +4. Generate each clip with the transition contract prompt (template in `references/prompts.md`), `aspect_ratio` from gate 2, `duration` an integer 3–10. **Generate at the length you need** — never generate long and speed-ramp with `setpts`, which desynchronises lipsync exactly where speech starts.
 +5. **If the ad has an on-camera speaker**, Omni cannot be given your voiceover — it invents its own speech and animates the mouth to that. Strip its audio (`-an`), then bind the real VO with `fal-ai/sync-lipsync/v2`. Pad the VO's lead-in silence to the frame where the character is actually ready to speak; find that frame by inspecting the clip, not by assuming.
 +6. **For multi-scene ads, generate the outro clip N too** (single-reference idle animation of the final still — template in `references/prompts.md`) and include it in the quote. Without it the last narration line plays over a frozen still, which clients reliably read as a bug. assemble.sh picks it up automatically.
- 
- ### Assembly (free)
- 
--Run `scripts/assemble.sh <ad-folder>`. Per scene it trims the clip to that line's measured VO duration (freeze-holding the last frame if the VO runs past the clip), muxes the narration, concats everything, and normalizes loudness to -14 LUFS. Optional: pass a music bed file to duck it under the narration. Output: `final.mp4`, 9:16, ready to post.
++
++### Assembly (free)
++
 +Run `scripts/assemble.sh <ad-folder>`. Per scene it trims the clip to that line's measured VO duration (freeze-holding the last frame if the VO runs past the clip), muxes the narration, concats everything, and normalizes loudness to -14 LUFS. Optional: pass a music bed file to duck it under the narration. Output: `final.mp4` at the gate-2 aspect, ready to post.
 +
 +For a single-scene ad the script is overkill — trim, mux, and `loudnorm=I=-14:TP=-1.5:LRA=11` directly.
 +
 +**Captions.** Landing-page and feed video autoplays muted, so a voiceover-only ad is silent mouth movement to most viewers. Offer burned-in captions on any ad whose message lives in the narration; it costs nothing but ffmpeg. Time them from ElevenLabs forced alignment against the existing mp3 (see `references/fal-api.md`), never by estimating, and offset every timestamp by the lead-in pad. Keep the `.ass` file in the ad folder so wording and position stay re-editable for free.
- 
- Show the user the final file. Offer the natural iterations: swap a line's VO take, repair one scene, re-run assembly (assembly is free — regeneration is not).
- 
++
++Show the user the final file. Offer the natural iterations: swap a line's VO take, repair one scene, re-run assembly (assembly is free — regeneration is not).
++
++## Execution environment (read before the first generation)
++
++Skill provisioning may strip the executable bit from `scripts/*.sh` — copy them into the project folder and `chmod +x` there (this also survives skill updates mid-project). Invoke with `bash script.sh` if in doubt; tts_line.sh's internal fal_run.sh call is already bash-wrapped for this reason.
++
++**Send every artifact as it lands (default behavior):** immediately after each successful poll — style lock, each master, each scene still, each clip, the final — send that file to the user inline before submitting the next generation. Never batch artifacts up for a later reveal; the user watching each one pop onto the screen as it completes is part of the product (these runs are often screen-recorded for demos). The review gates still exist on top of this: the contact sheet, voice sample, and cost quotes remain the explicit stop-and-approve moments.
++
++Each image or clip generation takes 1–3 minutes at the provider. Two rules keep that survivable in any environment:
++
++1. **One generation per tool call, always in the foreground.** Never loop several generations inside one bash invocation — a chain of ten 2-minute jobs inside one call will hit the platform's tool timeout and die mid-batch. The chain is sequential anyway; one call per scene costs nothing and survives everything.
++2. **Never background the work (`nohup`, `&`).** Sandboxed environments reap orphaned processes, and you lose the job handle when they do. You don't need a local background process — FAL's queue IS the background: the job runs server-side and survives anything that happens to your shell. When a single generation might outlive a tool call (short-timeout platforms like claude.ai chat), use the split flow:
++
++```
++scripts/fal_run.sh submit <model> payload.json scene-04 <ad>/jobs   # returns immediately
++scripts/fal_run.sh poll scene-04 <ad>/jobs stills/scene-04.png      # exit 0 done · 2 still running (call again) · 1 failed
++```
++
++Job state persists in `<ad>/jobs/`, so polling resumes across tool calls and even across sessions. In Claude Code (bash timeouts up to 10 minutes), the one-shot form is fine for single generations; the submit/poll split is still the safer habit for clips.
++
++## Cost discipline
++
++Before every paid step, print what it costs — image count × image price, clip count × clip price — using current prices from the model pages (see `references/fal-api.md`; prices change, so verify once per session, not per call). Never fire a batch the user hasn't seen a number for. Track actual spend in the project folder as you go; report the total at the end. A typical 10-scene ad: ~13 images + 9 clips + 10 TTS lines.
++
++## Failure handling
++
++- FAL queue jobs can fail or hang: `scripts/fal_run.sh` times out and reports; retry once, then show the user the error rather than burning retries.
++- If a generated image violates its contract (character in the style lock, garbled label, wrong character), regenerate with a revision note naming the violation — don't accept and hope the next stage fixes it. Later stages amplify, never repair.
++- If a param name is rejected by a model, check the model's page at fal.ai for the current schema before retrying — `references/fal-api.md` payloads are a starting point, not gospel.
 --- a/references/fal-api.md
 +++ b/references/fal-api.md
 @@ -22,7 +22,11 @@
@@ -275,3 +546,188 @@
  ## Outro clip (reference-to-video; reference = final still only)
  
  There are N−1 transition clips for N scenes, which leaves the last narration line playing over a frozen still — and a held still reads as a rendering glitch, not a choice. Generate clip N as a single-reference idle animation of the final still (+1 clip cost; assemble.sh uses it automatically when `clips/clip-NN.mp4` exists):
+@@ -104,3 +135,79 @@
+ ## Revision requests
+ 
+ For any regeneration, append to the original prompt: `Revision request: [user's note].` Change nothing else — the rest of the prompt is the consistency contract, and rewriting it during repairs is how repairs introduce new drift.
++
++---
++
++# Volume pipeline templates (Kie / `kling/ai-avatar-standard`)
++
++For single-scene talking pieces where the character speaks to camera and no discrete
++action is required. Schema and constraints in `references/kie-api.md`.
++
++## Still design — two rules that decide whether the video works
++
++These are free to obey at the image stage and expensive to fix afterwards.
++
++1. **Settled hands, holding nothing loose.** Hands resting on a closed book, wrapped around
++   a mug, folded on a table, on the arms of a chair. An audio-driven model given an object
++   mid-manipulation will fumble it — an open book gets closed, reopened, and raised again at
++   random. Nothing to manipulate means nothing to get wrong.
++2. **Face large and near-frontal.** Lipsync quality scales with how many pixels the face
++   occupies. A subject sitting back and angled away syncs visibly worse than one framed
++   mid-chest up and square to camera. Generate at `resolution: "2K"` for the same reason.
++
++**Put ambient motion elements INTO the still**, then ask the video prompt to move them:
++steam off a hot drink, firelight, a curtain at a window, leaves behind a porch. The video
++model animates what is already in frame far more reliably than it invents something new.
++
++## Subject still (image edit; reference = the user's character art)
++
++```
++Handcrafted claymation frame, medium close-up framed from mid-chest up so the face is large in frame.
++[Setting: where they are, the light, what is around them, one sentence.]
++[Ambient element that will move: steam rising from the mug / firelight in the hearth / a curtain at the window.]
++
++The supplied image is the ONLY authority for this character. Reproduce exactly: [appearance clauses — face, glasses, hair, facial hair, skin tone, wardrobe]. Do not redesign the character. Do not change facial features. Matte plasticine clay with visible tooling, felted fabric clothing.
++
++[Settled-hands clause: both hands wrapped around the mug resting on the table / hands folded on the closed book in his lap.]
++
++He looks directly into the camera lens with warm steady eye contact and a kind gentle smile, mouth closed and relaxed. Handcrafted stop-motion claymation, shallow depth of field. No readable text, no lettering, no signage, no other person, no borders.
++```
++
++`mouth closed and relaxed` in the still matters — an open, mid-speech mouth in the source
++frame biases the animation toward wider shapes throughout.
++
++## Avatar clip (image + audio + prompt)
++
++Four clauses, in this order. The restraint clause is the one that stops the delivery
++reading as a puppet.
++
++```
++A handcrafted stop-motion claymation scene. [One sentence: who, where, and that they are talking to a friend across the table.]
++
++Speech delivery is UNDERSTATED and RESTRAINED: small, subtle, natural mouth movements, softly spoken, gentle and low-key. Do NOT over-articulate. Do NOT exaggerate the jaw or stretch the mouth wide. Keep the mouth movements small and realistic, the way a calm older person speaks quietly.
++
++Body and hands stay alive: [fingers shift and resettle against the mug, one thumb moves slowly across its surface], shoulders rise and fall softly with breathing, and they lean in a touch while speaking. [Ambient motion: gentle wisps of steam drift and curl upward from the hot coffee throughout the shot.]
++
++Warm, kind expression with slow natural blinks and small head nods. Locked-off camera, no zoom, no camera movement.
++```
++
++Failure modes and their fixes, all prompt-level:
++
++| Symptom | Cause | Fix |
++|---|---|---|
++| Mouth too exaggerated, puppet-like | asking for "clear articulate mouth movement" | the restraint clause above, verbatim |
++| Body frozen, all motion in the face | a prompt that asked for stillness ("hands stay at rest") | the body-and-hands clause |
++| Object fumbled, opened/closed at random | object was mid-manipulation in the still | fix the still, not the prompt |
++| Sync soft or drifting | face too small or angled in the still | reframe closer and squarer |
++
++## Lead-in — always
++
++Avatar output starts speaking on frame one, which reads as a truncated or broken video.
++Hold the first frame briefly before the voice starts:
++
++```
++ffmpeg -vf "tpad=start_duration=0.6:start_mode=clone,fps=24" \
++       -af "adelay=600:all=1,loudnorm=I=-14:TP=-1.5:LRA=11"
++```
++
++0.6s is a good default. Offset every caption timestamp by the same amount.
+--- a/references/kie-api.md
++++ b/references/kie-api.md
+@@ -0,0 +1,102 @@
++# Kie.ai API reference
++
++Second provider alongside FAL. Used for the **volume pipeline** (see SKILL.md) because
++`kling/ai-avatar-standard` fuses animation and lipsync into one call, and Kie's
++`gpt-image-2` is cheaper and higher-resolution than FAL's.
++
++Auth is `KIE_API_KEY` as a bearer token. Prices below are credits; **1 credit = $0.005**.
++Verify per session — check `GET /api/v1/chat/credit` and the model's page at
++`https://kie.ai/<model-slug>`.
++
++## Mechanics
++
++```
++POST https://api.kie.ai/api/v1/jobs/createTask     # {model, input:{...}} -> {taskId}
++GET  https://api.kie.ai/api/v1/jobs/recordInfo?taskId=<id>
++GET  https://api.kie.ai/api/v1/chat/credit          # -> {data: <credits remaining>}
++```
++
++`recordInfo` returns `state`: `waiting` | `queuing` | `generating` | `success` | `fail`,
++plus `failMsg` and `resultJson` (a JSON *string* containing `resultUrls[]` — parse twice).
++
++Some model families have their own endpoints instead of the Market API:
++`/api/v1/veo/generate`, `/api/v1/gpt4o-image/generate`, `/api/v1/runway/generate`.
++
++### Four operational facts that will bite you
++
++1. **There is NO cancel endpoint and NO task-list endpoint.** A submitted job cannot be
++   stopped, and if you lose the `taskId` you cannot recover it — the spend is simply gone.
++   Write every `taskId` to disk in the same tool call that submits it.
++2. **A validation error and a queued job look similar.** `{"code":422|500,...}` means
++   rejected and free; `{"code":200,...,"data":{"taskId":...}}` means **queued and billable**.
++   When probing schemas, use a deliberately malformed value (a bad URL) so nothing can
++   succeed. Probing with plausible payloads spends real money.
++3. **Charging is inconsistent.** Some models deduct at start (`kling/ai-avatar-*`), others
++   on completion. Failed jobs are generally not charged. Measure cost as a credit delta
++   across the call, never assume.
++4. **Rate limit: 20 new generation requests per 10 seconds.** Bursting past it returns
++   `"Your call frequency is too high"` — which is NOT a signal that a model does not exist.
++   Re-probe anything that returned 429 before concluding anything from it.
++
++### Queue reliability
++
++Observed completion times for one 7s avatar job, same payload shape, across one session:
++**50s, 105s, 160s, 165s, 180s, 200s, 315s**, one server-side failure at 1211s
++(`failCode 524, "generate task timeout"`), and one that sat 30 minutes before succeeding.
++
++FAL was consistently 90–180s. Budget for the tail: poll with a generous ceiling, and on
++`fail` **resubmit once** — retries have consistently cleared fast. A failed job is not
++charged, so a retry costs nothing but time. At volume this needs real retry handling.
++
++## Models (verified 2026-08)
++
++| Role | Model ID | Price | Notes |
++|---|---|---|---|
++| Image (text→image) | `gpt-image-2-text-to-image` | 10 cr / $0.05 | `aspect_ratio` 16 values inc. 5:4, `resolution` 1K/2K/4K |
++| Image (edit) | `gpt-image-2-image-to-image` | 10 cr / $0.05 | `input_urls: []` — identity-preserving edits |
++| **Talking video + lipsync** | `kling/ai-avatar-standard` | **8 cr/s / $0.04/s** | 720p, image+audio+prompt, **15s max per generation** |
++| Talking video + lipsync | `kling/ai-avatar-pro` | 16 cr/s / $0.08/s | 1080p; detail gain is modest — Standard is usually the right call |
++| Talking video + lipsync | `infinitalk/from-audio` | 72 cr / $0.36 | Wan 2.1 base. Softer, waxier. Superseded by Avatar — cheaper AND better |
++| Promptable video | `bytedance/seedance-2-5` | 28/63/114 cr/s at 480/720/1080p | See constraints below |
++| Image (alt) | `google/nano-banana`, `google/nano-banana-edit` | — | Not used; `gpt-image-2` keeps parity with FAL |
++
++**Kie's `gpt-image-2` beats FAL's**: $0.05 vs ~$0.08, and 2048×1152 at `resolution: "2K"`
++vs FAL's fixed 1088×608. Generate stills here even when the video step runs on FAL —
++Kie returns hosted URLs that FAL accepts as reference inputs.
++
++### `kling/ai-avatar-standard` — the volume workhorse
++
++```json
++{ "model": "kling/ai-avatar-standard",
++  "input": { "image_url": "...", "audio_url": "...", "prompt": "..." } }
++```
++
++Audio-driven: it animates the mouth to the audio you supply, and **embeds that audio in
++the output** — so no separate lipsync pass. Confirm the output audio duration matches your
++VO to be sure your voice survived.
++
++**The prompt is a real lever — more than the "audio-driven" label suggests.** It cannot
++choreograph a discrete action (it will not close a book on cue), but it reliably controls
++*motion quality and ambient detail*: articulation restraint, finger movement, breathing,
++drifting steam. See the recipe in `prompts.md`. Early failures here were caused by prompts
++that asked for stillness, not by model limits.
++
++Output is padded past the audio (7.2s video for a 6.1s VO) — trim to the VO plus a short tail.
++
++### `bytedance/seedance-2-5` — premium promptable video
++
++Honors in-prompt timing like Omni does (a beat placed "within the first two seconds" lands
++early, not smeared), and `last_frame_url` does **not** cause the even-interpolation problem
++that Kling's `tail_image_url` has. Up to 30s, up to 1080p. Two hard constraints:
++
++- **Frame-anchored tasks require `aspect_ratio: "adaptive"`.** Any other value 422s.
++- **`reference_audio_urls` and `first_frame_url`/`last_frame_url` are MUTUALLY EXCLUSIVE**
++  — "only one scene can be selected". So Seedance cannot do directed motion *and* your
++  chosen voice in one call.
++
++Because Kie's lipsync models accept an image and never a video, a Seedance motion clip
++**cannot be lipsynced anywhere on Kie**. Directed motion plus a chosen voice is only
++possible on FAL (Omni → `sync-lipsync/v2`). That is structural, not a pricing question.
++
++Pricing note: we sit in the "no video input" column (frames are images), the more expensive
++one. At 720p Seedance is ~2.4× Omni per second. It is a premium option, not a saving.

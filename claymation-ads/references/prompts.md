@@ -135,3 +135,79 @@ One TTS call per script line, voice consistent across all lines. Emphasis: writi
 ## Revision requests
 
 For any regeneration, append to the original prompt: `Revision request: [user's note].` Change nothing else — the rest of the prompt is the consistency contract, and rewriting it during repairs is how repairs introduce new drift.
+
+---
+
+# Volume pipeline templates (Kie / `kling/ai-avatar-standard`)
+
+For single-scene talking pieces where the character speaks to camera and no discrete
+action is required. Schema and constraints in `references/kie-api.md`.
+
+## Still design — two rules that decide whether the video works
+
+These are free to obey at the image stage and expensive to fix afterwards.
+
+1. **Settled hands, holding nothing loose.** Hands resting on a closed book, wrapped around
+   a mug, folded on a table, on the arms of a chair. An audio-driven model given an object
+   mid-manipulation will fumble it — an open book gets closed, reopened, and raised again at
+   random. Nothing to manipulate means nothing to get wrong.
+2. **Face large and near-frontal.** Lipsync quality scales with how many pixels the face
+   occupies. A subject sitting back and angled away syncs visibly worse than one framed
+   mid-chest up and square to camera. Generate at `resolution: "2K"` for the same reason.
+
+**Put ambient motion elements INTO the still**, then ask the video prompt to move them:
+steam off a hot drink, firelight, a curtain at a window, leaves behind a porch. The video
+model animates what is already in frame far more reliably than it invents something new.
+
+## Subject still (image edit; reference = the user's character art)
+
+```
+Handcrafted claymation frame, medium close-up framed from mid-chest up so the face is large in frame.
+[Setting: where they are, the light, what is around them, one sentence.]
+[Ambient element that will move: steam rising from the mug / firelight in the hearth / a curtain at the window.]
+
+The supplied image is the ONLY authority for this character. Reproduce exactly: [appearance clauses — face, glasses, hair, facial hair, skin tone, wardrobe]. Do not redesign the character. Do not change facial features. Matte plasticine clay with visible tooling, felted fabric clothing.
+
+[Settled-hands clause: both hands wrapped around the mug resting on the table / hands folded on the closed book in his lap.]
+
+He looks directly into the camera lens with warm steady eye contact and a kind gentle smile, mouth closed and relaxed. Handcrafted stop-motion claymation, shallow depth of field. No readable text, no lettering, no signage, no other person, no borders.
+```
+
+`mouth closed and relaxed` in the still matters — an open, mid-speech mouth in the source
+frame biases the animation toward wider shapes throughout.
+
+## Avatar clip (image + audio + prompt)
+
+Four clauses, in this order. The restraint clause is the one that stops the delivery
+reading as a puppet.
+
+```
+A handcrafted stop-motion claymation scene. [One sentence: who, where, and that they are talking to a friend across the table.]
+
+Speech delivery is UNDERSTATED and RESTRAINED: small, subtle, natural mouth movements, softly spoken, gentle and low-key. Do NOT over-articulate. Do NOT exaggerate the jaw or stretch the mouth wide. Keep the mouth movements small and realistic, the way a calm older person speaks quietly.
+
+Body and hands stay alive: [fingers shift and resettle against the mug, one thumb moves slowly across its surface], shoulders rise and fall softly with breathing, and they lean in a touch while speaking. [Ambient motion: gentle wisps of steam drift and curl upward from the hot coffee throughout the shot.]
+
+Warm, kind expression with slow natural blinks and small head nods. Locked-off camera, no zoom, no camera movement.
+```
+
+Failure modes and their fixes, all prompt-level:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Mouth too exaggerated, puppet-like | asking for "clear articulate mouth movement" | the restraint clause above, verbatim |
+| Body frozen, all motion in the face | a prompt that asked for stillness ("hands stay at rest") | the body-and-hands clause |
+| Object fumbled, opened/closed at random | object was mid-manipulation in the still | fix the still, not the prompt |
+| Sync soft or drifting | face too small or angled in the still | reframe closer and squarer |
+
+## Lead-in — always
+
+Avatar output starts speaking on frame one, which reads as a truncated or broken video.
+Hold the first frame briefly before the voice starts:
+
+```
+ffmpeg -vf "tpad=start_duration=0.6:start_mode=clone,fps=24" \
+       -af "adelay=600:all=1,loudnorm=I=-14:TP=-1.5:LRA=11"
+```
+
+0.6s is a good default. Offset every caption timestamp by the same amount.

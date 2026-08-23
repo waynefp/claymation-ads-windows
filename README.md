@@ -64,7 +64,41 @@ Rewritten to glob in the shell and stage sequentially-numbered copies, feeding f
 
 **Behaviour change:** the sheet now matches `scene-NN.png` specifically rather than `scene-*.png`. That is the skill's documented naming convention, but oddly-named stills are excluded rather than silently misordered.
 
-## 3. Gemini Omni as the default video model
+## 3. Two documented pipelines: volume (Kie) and movement (FAL)
+
+The upstream skill assumes one path: multi-scene, FAL-only, five approval gates. This fork
+documents a second, much cheaper path for single-character talking pieces, and makes the
+provider choice explicit per step rather than per platform.
+
+**Volume mode — ~$0.33 per finished video.** One still (Kie `gpt-image-2-image-to-image` at
+2K, $0.05) plus one call to `kling/ai-avatar-standard` ($0.04/s), which animates the face
+*and* embeds your chosen ElevenLabs voice — no separate lipsync pass. Then lead-in, captions,
+loudness locally. Right for recurring content where someone simply talks to camera.
+
+**Movement mode — ~$1.90.** Needed only when a discrete action must happen. Directed motion
+plus a chosen voice is **only** possible on FAL: Omni takes prompt direction but no audio;
+Kie's avatar models take audio but animate only the face; and Kie's promptable video model
+(Seedance 2.5) rejects reference audio and frame anchors together. Nothing on Kie closes
+that gap at any price.
+
+Stills come from Kie in **both** modes — cheaper than FAL ($0.05 vs ~$0.08) and far higher
+resolution (2048×1152 vs 1088×608). FAL accepts Kie's hosted URLs as reference inputs.
+
+New reference: **`references/kie-api.md`** — verified model IDs and prices, the four
+operational traps (no cancel endpoint, no task-list endpoint, inconsistent charge timing,
+a 20-req/10s rate limit that masquerades as "model not found"), and measured queue times.
+
+Two still-design rules now in `prompts.md`, both learned the expensive way:
+**settled hands** (an audio-driven model given an object mid-manipulation will fumble it)
+and **face large and near-frontal** (lipsync quality scales with face pixels).
+
+Plus a four-clause avatar prompt recipe. The restraint clause — explicitly forbidding
+over-articulation — is what stops the delivery reading as a puppet, and the body/ambient
+clause is what stops it reading as a frozen mannequin. Ambient motion (steam, firelight)
+belongs in the still; the video model animates what is already there far more reliably
+than it invents something new.
+
+## 4. Gemini Omni as the default FAL video model
 
 Documentation-only; no script behaviour changed. `SKILL.md`, `references/fal-api.md`, and `references/prompts.md` now default to `gpt-image-2` for images and `google/gemini-omni-flash/reference-to-video` for video.
 
